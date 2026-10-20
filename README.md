@@ -1,3 +1,32 @@
+# Build
+
+Use JDK 11 and Maven to build and test the application:
+
+```shell
+mvn -B clean test package
+```
+
+The build produces `target/helloworld.war`, test results in
+`target/surefire-reports/`, and coverage reports in `target/site/jacoco/`.
+JUnit 4.13.2 is required for compatibility with current Maven Surefire versions.
+The GitHub Actions build uses Ubuntu 24.04 and Node.js 24-based actions.
+
+# Azure DevOps migration agent
+
+The shared [ADO to GitHub Actions agent](.github/agents/ado-to-github.agent.md)
+converts Azure DevOps pipelines to GitHub Actions across languages and platforms.
+In VS Code Copilot Chat, select **ADO to GitHub Actions** from the agent picker,
+then provide the source pipeline path or classic pipeline export, any referenced
+templates, and destination requirements. For example:
+
+> Convert azure-pipelines.yml and its templates to GitHub Actions. Preserve
+> triggers, tests, artifacts, and deployment approvals. Identify required secrets
+> and manual setup, and validate the build without deploying or pushing.
+
+The agent flags unsupported features and missing configuration rather than
+promising automatic conversion of every ADO feature. Commit the agent file to
+share it with the team; copy it into another repository's `.github/agents/`
+directory to reuse it there.
 
 # Contributing
 

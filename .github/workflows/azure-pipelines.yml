@@ -1,0 +1,141 @@
+name: Maven build
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+# Preserve pr.autoCancel's default without cancelling independent push builds.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      MAVEN_CACHE_FOLDER: ${{ runner.temp }}/.m2/repository
+      MAVEN_OPTS: -Dmaven.repo.local=${{ runner.temp }}/.m2/repository
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Cache Maven packages
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.MAVEN_CACHE_FOLDER }}
+          key: maven-${{ runner.os }}-${{ hashFiles('pom.xml') }}
+          restore-keys: |
+            maven-${{ runner.os }}-
+
+      - name: Set up JDK 11
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
+          architecture: x64
+          overwrite-settings: false
+
+      # The POM supplies JaCoCo 0.8.2; Maven@4's runtime POM rewriting is
+      # not reproduced. Coverage instrumentation parity remains unresolved.
+      - name: Build, test and package
+        id: maven
+        run: mvn -B clean verify
+
+      # Summaries and downloadable reports are not Azure's native report UI.
+      - name: Publish test and coverage summaries
+        if: ${{ !cancelled() && (steps.maven.outcome == 'success' || steps.maven.outcome == 'failure') }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          def annotate(level, message):
+              escaped = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              print(f"::{level}::{escaped}")
+
+          reports = sorted(Path(".").glob("**/surefire-reports/TEST-*.xml"))
+          tests = failures = errors = skipped = 0
+          for report in reports:
+              root = ET.parse(report).getroot()
+              for case in root.iter("testcase"):
+                  tests += 1
+                  failures += case.find("failure") is not None
+                  errors += case.find("error") is not None
+                  skipped += case.find("skipped") is not None
+                  for result in ("failure", "error"):
+                      detail = case.find(result)
+                      if detail is not None:
+                          annotate("error", f"{case.get('classname', '')}.{case.get('name', '')}: "
+                                   f"{detail.get('message', result)}")
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("## JUnit results\n\n")
+              if reports:
+                  summary.write(f"Tests: {tests}; failures: {failures}; errors: {errors}; skipped: {skipped}.\n\n")
+              else:
+                  annotate("warning", "No JUnit reports matched **/surefire-reports/TEST-*.xml.")
+                  summary.write("No JUnit reports were produced. No missing-test gate was added.\n\n")
+
+              summary.write("## JaCoCo coverage\n\n")
+              coverage = Path("target/site/jacoco/jacoco.xml")
+              if coverage.is_file():
+                  root = ET.parse(coverage).getroot()
+                  summary.write("| Counter | Covered | Missed |\n| --- | ---: | ---: |\n")
+                  for counter in root.findall("counter"):
+                      kind = counter.attrib["type"]
+                      covered = int(counter.attrib["covered"])
+                      missed = int(counter.attrib["missed"])
+                      summary.write(f"| {kind} | {covered} | {missed} |\n")
+              else:
+                  annotate("warning", "No JaCoCo XML report was produced; source failIfCoverageEmpty defaults to false.")
+                  summary.write("No coverage report was produced. No coverage threshold was added.\n")
+          PY
+
+      - name: Retain JUnit reports
+        if: ${{ !cancelled() && (steps.maven.outcome == 'success' || steps.maven.outcome == 'failure') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-results
+          path: '**/surefire-reports/TEST-*.xml'
+          if-no-files-found: warn
+
+      - name: Retain JaCoCo reports
+        if: ${{ !cancelled() && (steps.maven.outcome == 'success' || steps.maven.outcome == 'failure') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-report
+          path: target/site/jacoco/
+          if-no-files-found: warn
+
+      - name: Publish WAR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: drop
+          path: target/*.war
+          # CopyFiles@2 succeeds when no WAR matches; do not add a new gate.
+          if-no-files-found: warn
+
+# Setup: enable GitHub Actions and permit the official actions above.
+# No configured secrets, variable groups, service connections or deployments
+# are present in the source. GITHUB_TOKEN is supplied by GitHub.
+# Versions/inputs follow docs.github.com's Maven, cache and artifact examples;
+# tag metadata requests for newer action versions returned HTTP 403.
+# Before CI cutover, resolve the coverage/reporting gaps above and compare
+# source retention, checkout settings, fork approvals and required checks.
+# Retention uses GitHub repository policy; source service-side policy is absent.
+# GitHub's native CI-skip directives differ from Azure-specific skip directives.
